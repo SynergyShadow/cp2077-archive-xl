@@ -1,4 +1,4 @@
-name: Build ArchiveXL
+name: Build
 
 on:
   workflow_dispatch:
@@ -6,25 +6,22 @@ on:
     paths:
       - 'src/**'
       - 'lib/**'
+      - 'bundle/**'
+      - 'scripts/**'
+      - '**/*.reds'
       - 'xmake.lua'
       - '.github/workflows/build.yml'
-
-permissions:
-  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
-          fetch-depth: 0
 
-      - name: Setup Xmake
-        uses: xmake-io/github-action-setup-xmake@v1
+      - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
 
@@ -32,44 +29,46 @@ jobs:
         run: xmake f -m release -a x64 -y
 
       - name: Build
-        run: xmake -y
+        run: xmake build -y
 
       - name: Package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          New-Item -ItemType Directory -Force dist | Out-Null
 
-          $dll = Get-ChildItem -Path . -Filter 'ArchiveXL.dll' -File -Recurse |
-            Where-Object {
-              $_.FullName -notmatch '[\\/](\.git|\.github|dist|\.xmake)[\\/]'
-            } |
-            Sort-Object LastWriteTime -Descending |
+          $dll = Get-ChildItem -Path build -Filter 'ArchiveXL.dll' -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1
 
           if (-not $dll) {
-            Write-Host 'ArchiveXL.dll not found. Listing build files:'
-            Get-ChildItem -Path build -Recurse -ErrorAction SilentlyContinue |
-              Select-Object FullName
-            throw 'ArchiveXL.dll was not produced.'
+            $dll = Get-ChildItem -Path . -Filter 'ArchiveXL.dll' -File -Recurse |
+              Where-Object { $_.FullName -notmatch '[\\/](\.git|\.github|dist)[\\/]' } |
+              Select-Object -First 1
           }
 
-          Copy-Item -Path $dll.FullName -Destination 'dist\ArchiveXL.dll' -Force
+          if (-not $dll) {
+            throw 'ArchiveXL.dll was not found.'
+          }
 
-          foreach ($d in @('bundle', 'scripts', 'config', 'support')) {
+          Copy-Item $dll.FullName 'dist\ArchiveXL.dll' -Force
+
+          foreach ($d in @('bundle', 'scripts')) {
             if (Test-Path $d -PathType Container) {
-              Copy-Item -Path $d -Destination "dist\$d" -Recurse -Force
+              Copy-Item $d "dist\$d" -Recurse -Force
             }
           }
 
-          Write-Host 'Packaged files:'
-          Get-ChildItem -Path dist -Recurse |
-            Select-Object FullName, Length
+          Get-ChildItem -Path . -Filter '*.reds' -File -Recurse |
+            Where-Object { $_.FullName -notmatch '[\\/](\.git|\.github|dist|build)[\\/]' } |
+            ForEach-Object {
+              $destination = Join-Path 'dist' $_.Name
+              Copy-Item $_.FullName $destination -Force
+            }
 
-      - name: Upload ArchiveXL artifact
-        uses: actions/upload-artifact@v4
+          Get-ChildItem -Recurse dist | Select-Object FullName, Length
+
+      - uses: actions/upload-artifact@v4
         with:
           name: ArchiveXL-2.5
-          path: dist/
-          if-no-files-found: error
+          path: dist
