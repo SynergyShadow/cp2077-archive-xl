@@ -7,13 +7,9 @@ on:
       - 'src/**'
       - 'lib/**'
       - 'bundle/**'
-      - 'Bundle/**'
       - 'scripts/**'
-      - 'Scripts/**'
-      - '**/*.reds'
-      - '**/*.yaml'
-      - 'LICENSE'
-      - 'THIRD_PARTY_LICENSES'
+      - 'config/**'
+      - 'tools/dist/**'
       - 'xmake.lua'
       - '.github/workflows/build.yml'
 
@@ -28,104 +24,112 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
 
       - name: Configure
+        shell: pwsh
         run: xmake f -m release -a x64 -y
 
       - name: Build
-        run: xmake build -y
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          xmake build
+          if ($LASTEXITCODE -ne 0) {
+            throw "Xmake build failed with exit code $LASTEXITCODE"
+          }
 
       - name: Package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $stage = Join-Path $PWD 'stage'
+          $dist = Join-Path $PWD 'dist'
 
-          # Locate the compiled DLL
-          $dll = Get-ChildItem -Path build -Filter 'ArchiveXL.dll' -File -Recurse -ErrorAction SilentlyContinue |
+          Remove-Item $stage, $dist -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $stage, $dist | Out-Null
+
+          # Find the compiled DLL.
+          $dll = Get-ChildItem -Path build -Filter 'ArchiveXL.dll' -File -Recurse |
             Select-Object -First 1
 
           if (-not $dll) {
-            $dll = Get-ChildItem -Path . -Filter 'ArchiveXL.dll' -File -Recurse |
-              Where-Object {
-                $_.FullName -notmatch '[\\/](\.git|\.github|dist)[\\/]'
-              } |
-              Select-Object -First 1
+            throw 'ArchiveXL.dll was not found. Check the Build step.'
           }
 
-          if (-not $dll) {
-            throw 'ArchiveXL.dll was not found after building.'
+          Copy-Item $dll.FullName (Join-Path $dist 'ArchiveXL.dll') -Force
+
+          # Bundle: preserve the repository's actual .archive and .xl files.
+          if (-not (Test-Path 'bundle' -PathType Container)) {
+            throw 'The repository bundle directory was not found.'
           }
 
-          Copy-Item -Path $dll.FullName -Destination 'dist\ArchiveXL.dll' -Force
+          Copy-Item 'bundle' (Join-Path $dist 'Bundle') -Recurse -Force
 
-          # Package the runtime folders with the correct names
-          foreach ($folder in @('Bundle', 'Scripts')) {
-            if (Test-Path $folder -PathType Container) {
-              Copy-Item -Path $folder -Destination "dist\$folder" -Recurse -Force
+          # Generate the REDscript bundles from the scripts source.
+          $compose = 'tools/dist/steps/compose-redscripts.ps1'
+
+          if (-not (Test-Path $compose -PathType Leaf)) {
+            throw "REDscript composition script not found: $compose"
+          }
+
+          & $compose -StageDir $stage -ProjectName 'ArchiveXL' -Version '2.5'
+
+          if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            throw 'REDscript composition failed.'
+          }
+
+          $generatedScripts = Join-Path $stage 'red4ext/plugins/ArchiveXL/Scripts'
+
+          if (-not (Test-Path $generatedScripts -PathType Container)) {
+            throw "Generated Scripts directory not found: $generatedScripts"
+          }
+
+          Copy-Item $generatedScripts (Join-Path $dist 'Scripts') -Recurse -Force
+
+          # Include the runtime configuration and licenses.
+          $yaml = Get-ChildItem -Path . -Filter 'ArchiveXL.yaml' -File -Recurse |
+            Where-Object {
+              $_.FullName -notmatch '[\\/](\.git|build|dist|stage)[\\/]'
+            } |
+            Select-Object -First 1
+
+          if (-not $yaml) {
+            throw 'ArchiveXL.yaml was not found.'
+          }
+
+          Copy-Item $yaml.FullName (Join-Path $dist 'ArchiveXL.yaml') -Force
+
+          foreach ($file in @('LICENSE', 'THIRD_PARTY_LICENSES')) {
+            if (-not (Test-Path $file -PathType Leaf)) {
+              throw "Required file not found: $file"
             }
-            else {
-              $lower = $folder.ToLowerInvariant()
 
-              if (Test-Path $lower -PathType Container) {
-                Copy-Item -Path $lower -Destination "dist\$folder" -Recurse -Force
-              }
-              else {
-                Write-Warning "Folder '$folder' was not found."
-              }
-            }
+            Copy-Item $file (Join-Path $dist $file) -Force
           }
 
-          # Package the root-level metadata and REDscript files
-          $requiredFiles = @(
-            'ArchiveXL.yaml',
-            'LICENSE',
-            'THIRD_PARTY_LICENSES',
+          # Verify expected REDscript filenames.
+          $expected = @(
             'ArchiveXL.DynamicAppearance.reds',
             'ArchiveXL.Global.reds',
             'ArchiveXL.reds'
           )
 
-          foreach ($file in $requiredFiles) {
-            $found = Get-ChildItem -Path . -Filter $file -File -Recurse -ErrorAction SilentlyContinue |
-              Where-Object {
-                $_.FullName -notmatch '[\\/](\.git|\.github|dist|build)[\\/]'
-              } |
-              Select-Object -First 1
-
-            if ($found) {
-              Copy-Item -Path $found.FullName -Destination "dist\$file" -Force
-            }
-            elseif ($file -in @(
-              'ArchiveXL.DynamicAppearance.reds',
-              'ArchiveXL.Global.reds',
-              'ArchiveXL.reds'
-            )) {
-              Write-Warning "REDscript file '$file' was not found."
-            }
-            elseif ($file -in @('LICENSE', 'THIRD_PARTY_LICENSES')) {
-              Write-Warning "License file '$file' was not found."
-            }
-            else {
-              throw "Required file '$file' was not found."
+          foreach ($file in $expected) {
+            if (-not (Test-Path (Join-Path $dist "Scripts\$file"))) {
+              throw "Expected generated REDscript file is missing: $file"
             }
           }
 
-          # Verify the package
-          Write-Host ''
-          Write-Host 'ArchiveXL-2.5 package contents:'
-          Get-ChildItem -Path dist -Recurse |
+          Write-Host 'Final ArchiveXL-2.5 package:'
+          Get-ChildItem $dist -Recurse |
             Select-Object FullName, Length |
             Format-Table -AutoSize
-
-          if (-not (Test-Path 'dist\ArchiveXL.dll')) {
-            throw 'Package is missing ArchiveXL.dll.'
-          }
 
       - uses: actions/upload-artifact@v4
         with:
