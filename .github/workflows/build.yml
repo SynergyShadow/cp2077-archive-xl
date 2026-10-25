@@ -1,0 +1,75 @@
+name: Build ArchiveXL
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/**'
+      - 'lib/**'
+      - 'xmake.lua'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+
+      - name: Configure
+        run: xmake f -m release -a x64 -y
+
+      - name: Build
+        run: xmake -y
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+
+          $dll = Get-ChildItem -Path . -Filter 'ArchiveXL.dll' -File -Recurse |
+            Where-Object {
+              $_.FullName -notmatch '[\\/](\.git|\.github|dist|\.xmake)[\\/]'
+            } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $dll) {
+            Write-Host 'ArchiveXL.dll not found. Listing build files:'
+            Get-ChildItem -Path build -Recurse -ErrorAction SilentlyContinue |
+              Select-Object FullName
+            throw 'ArchiveXL.dll was not produced.'
+          }
+
+          Copy-Item -Path $dll.FullName -Destination 'dist\ArchiveXL.dll' -Force
+
+          foreach ($d in @('bundle', 'scripts', 'config', 'support')) {
+            if (Test-Path $d -PathType Container) {
+              Copy-Item -Path $d -Destination "dist\$d" -Recurse -Force
+            }
+          }
+
+          Write-Host 'Packaged files:'
+          Get-ChildItem -Path dist -Recurse |
+            Select-Object FullName, Length
+
+      - name: Upload ArchiveXL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ArchiveXL-2.5
+          path: dist/
+          if-no-files-found: error
